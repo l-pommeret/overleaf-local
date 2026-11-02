@@ -27,12 +27,9 @@ Les projets restent sur le Mac, dans `~/overleaf-local/data`.
 
 ## L'onglet Agent
 
-Dans un projet, l'icône **α** de la barre latérale ouvre l'agent, aux couleurs de pi-aristote. Il a deux onglets :
+Dans un projet, l'icône **α** de la barre latérale ouvre l'agent : pi-aristote en entier, dans un vrai terminal, avec ses commandes, `/aristote`, Ultracode, son navigateur… Il travaille sur une copie du projet tenue à jour dans les deux sens : ce qu'il écrit arrive dans Overleaf en quelques secondes (puis le PDF se recompile), et ce que tu tapes dans Overleaf lui parvient aussi.
 
-- **λ Discussion** : tu écris ce que tu veux (« ajoute une section sur… », « corrige les erreurs de compilation », « traduis l'introduction »). L'agent lit et modifie les fichiers du projet. Les changements apparaissent dans l'éditeur, puis le PDF se recompile. Dans ce mode, il ne peut lancer aucune commande.
-- **τ Terminal** : pi en entier, dans un vrai terminal, avec ses commandes, `/aristote`, Ultracode… Il travaille sur une copie du projet tenue à jour dans les deux sens : ce qu'il écrit arrive dans Overleaf en quelques secondes, et ce que tu tapes dans Overleaf lui parvient aussi.
-
-Dans les deux cas, pi sait qu'il est dans Overleaf : il peut lire le journal de la dernière compilation (`.overleaf/output.log`) pour corriger les erreurs. Le bouton **ν** démarre une nouvelle conversation, sinon l'agent garde le fil du projet.
+pi sait qu'il est dans Overleaf : il peut lire le journal de la dernière compilation (`.overleaf/output.log`) pour corriger les erreurs. Le bouton **ν** démarre une nouvelle conversation, sinon l'agent garde le fil du projet.
 
 - Il faut une clé Aristote : lance `pi` une fois dans le Terminal du Mac, puis `/aristote`.
 - Une suppression faite par l'agent n'est pas reportée dans Overleaf : il te le signale, et tu supprimes toi-même si c'est voulu.
@@ -42,7 +39,7 @@ Dans les deux cas, pi sait qu'il est dans Overleaf : il peut lire le journal de 
 - `local/module` : module Overleaf qui connecte automatiquement un utilisateur unique, affiche « Overleaf de YomYom » partout, ajoute le thème et l'onglet Agent, et sert à la synchronisation avec l'agent.
 - `local/init/50-sapin.sh` : remplace le vert Overleaf par du vert sapin au démarrage.
 - `local/image` : image Overleaf avec les collections LaTeX courantes.
-- `local/bridge` : petit serveur (Node et Python, sans dépendances) entre l'onglet Agent et `pi` : synchronisation du projet, discussion, terminal. Il n'est joignable que depuis le Mac (127.0.0.1) et il est protégé par un jeton.
+- `local/bridge` : petit serveur (Node et Python, sans dépendances) entre l'onglet Agent et `pi` : synchronisation du projet et terminal. Il n'est joignable que depuis le Mac (127.0.0.1) et il est protégé par un jeton.
 - `bin/init`, `lib/shared-functions.sh` : compatibilité avec les outils de base de macOS.
 
 Overleaf n'écoute que sur `127.0.0.1` : il n'est pas joignable depuis le réseau. Sans compte, quiconque utilise la session du Mac peut ouvrir les projets.

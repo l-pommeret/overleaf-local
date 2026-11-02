@@ -1,8 +1,6 @@
-// Onglet « Agent » de l'éditeur, aux couleurs de pi-aristote.
-//   λ Discussion : consignes à pi (sans commandes), modifications écrites dans le projet ;
-//   τ Terminal   : pi interactif dans un vrai terminal, sur une copie du projet tenue à jour
-//                  dans les deux sens.
-// Le pont local (local/bridge/agent-bridge.mjs) fait tourner pi sur le Mac.
+// Onglet « Agent » de l'éditeur, aux couleurs de pi-aristote : pi interactif dans un vrai
+// terminal, sur une copie du projet tenue à jour dans les deux sens. Le pont local
+// (local/bridge/agent-bridge.mjs) fait tourner pi sur le Mac.
 ;(function () {
   const CONFIG = window.OL_LOCAL_AGENT || {}
   const match = location.pathname.match(/^\/project\/([0-9a-f]{24})/)
@@ -11,7 +9,7 @@
   const PI_INSTALL = 'curl -fsSL https://raw.githubusercontent.com/l-pommeret/pi-aristote/main/install.sh | sh'
   const XTERM = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0'
   const XTERM_FIT = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0'
-  const STORE = { model: 'ol-agent-model', width: 'ol-agent-width', tab: 'ol-agent-tab' }
+  const STORE = { model: 'ol-agent-model', width: 'ol-agent-width' }
   const SYNC_EVERY = 3000
 
   const store = {
@@ -159,55 +157,36 @@
     }, 1500)
   }
 
-  // Écrit dans Overleaf les fichiers modifiés par pi ; renvoie le bloc de compte rendu.
+  // Écrit dans Overleaf les fichiers modifiés par pi et le signale dans le terminal.
   async function applyFiles({ changed = [], deleted = [] }) {
-    if (!changed.length && !deleted.length) return null
-    const box = h('div', { class: 'ol-agent-files' })
+    const done = []
     for (const f of changed) {
       try {
         await writeFile(f)
-        box.append(h('div', { class: 'ol-agent-ok' }, h('b', {}, 'σ '), f.path))
+        done.push(f.path)
       } catch (err) {
-        box.append(h('div', { class: 'ol-agent-ko' }, h('b', {}, '✗ '), `${f.path} : ${err.message}`))
+        flash(`✗ ${f.path} : ${err.message}`, true)
       }
     }
-    for (const p of deleted) box.append(h('div', { class: 'ol-agent-skip' }, h('b', {}, 'δ '), `${p} : supprimé par l’agent, gardé dans Overleaf`))
-    if (changed.length) recompileSoon()
-    return box
+    if (done.length) {
+      flash('σ ' + done.join(', ') + ' → Overleaf')
+      recompileSoon()
+    }
+    for (const p of deleted) flash(`δ ${p} : supprimé par l’agent, gardé dans Overleaf`, true)
   }
 
   // -------------------------------------------------------- panneau
 
-  let panel, chatLog, input, sendBtn, stopBtn, modelSelect, footer, tabBtn, chatView, termView
+  let panel, modelSelect, footer, tabBtn, termView
   let info = null
-  let busy = false
-  let current = null
-  let activeTab = store.get(STORE.tab) === 'terminal' ? 'terminal' : 'chat'
 
   function buildPanel() {
-    modelSelect = h('select', { class: 'ol-agent-model', title: 'Modèle Aristote' })
-    modelSelect.addEventListener('change', () => store.set(STORE.model, modelSelect.value))
-
-    chatLog = h('div', { class: 'ol-agent-log' })
-    input = h('textarea', { class: 'ol-agent-input', rows: '3', placeholder: 'Écris à l’agent…  (Entrée pour envoyer, Maj+Entrée pour aller à la ligne)' })
-    input.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-        e.preventDefault()
-        send()
-      }
+    modelSelect = h('select', { class: 'ol-agent-model', title: 'Modèle Aristote (pris en compte à la prochaine conversation)' })
+    modelSelect.addEventListener('change', () => {
+      store.set(STORE.model, modelSelect.value)
+      updateFooter()
     })
-    sendBtn = h('button', { class: 'ol-agent-btn', onclick: send }, 'Envoyer')
-    stopBtn = h('button', { class: 'ol-agent-btn ol-agent-btn-stop', onclick: stop, hidden: true }, 'Arrêter')
-    chatView = h(
-      'section',
-      { class: 'ol-agent-view' },
-      chatLog,
-      h('div', { class: 'ol-agent-compose' }, input, h('div', { class: 'ol-agent-actions' }, stopBtn, sendBtn))
-    )
-    termView = h('section', { class: 'ol-agent-view ol-agent-term', hidden: true })
-
-    const tab = (id, letter, label) =>
-      h('button', { class: 'ol-agent-tabbtn', 'data-tab': id, onclick: () => showTab(id) }, h('b', {}, letter), ' ', label)
+    termView = h('section', { class: 'ol-agent-view ol-agent-term' })
 
     const grip = h('div', { class: 'ol-agent-grip', title: 'Élargir' })
     grip.addEventListener('pointerdown', e => {
@@ -237,11 +216,9 @@
         h('span', { class: 'ol-agent-alpha' }, 'α'),
         h('span', { class: 'ol-agent-brand' }, h('strong', {}, 'Agent'), h('small', {}, 'pi-aristote')),
         modelSelect,
-        h('button', { class: 'ol-agent-icon', title: 'Nouvelle conversation', onclick: reset }, 'ν'),
+        h('button', { class: 'ol-agent-icon', title: 'Nouvelle conversation', onclick: () => restartTerminal(true) }, 'ν'),
         h('button', { class: 'ol-agent-icon', title: 'Fermer', onclick: toggle }, '×')
       ),
-      h('nav', { class: 'ol-agent-tabs' }, tab('chat', 'λ', 'Discussion'), tab('terminal', 'τ', 'Terminal')),
-      chatView,
       termView,
       footer
     )
@@ -250,19 +227,7 @@
     // Les raccourcis de l'éditeur ne doivent pas voir les frappes destinées à l'agent.
     for (const type of ['keydown', 'keypress', 'keyup']) panel.addEventListener(type, e => e.stopPropagation())
     document.body.append(panel)
-    welcome()
     updateFooter()
-  }
-
-  function welcome() {
-    chatLog.replaceChildren(
-      h(
-        'div',
-        { class: 'ol-agent-hint' },
-        h('p', {}, h('b', {}, 'Α'), ' L’agent lit et modifie les fichiers de ce projet ; ses changements apparaissent dans l’éditeur et le PDF se recompile.'),
-        h('p', {}, h('b', {}, 'λ'), ' Discussion : tu demandes, il écrit. ', h('b', {}, 'τ'), ' Terminal : pi en entier, avec ses commandes.')
-      )
-    )
   }
 
   function updateFooter(error) {
@@ -272,16 +237,6 @@
       h('span', { class: error ? 'ol-agent-foot-ko' : lastSyncOk ? 'ol-agent-foot-ok' : '' }, h('b', {}, 'Φ '), error ? 'synchro : ' + error : lastSyncOk ? 'projet synchronisé' : 'synchro en attente'),
       h('span', {}, h('b', {}, 'π '), model)
     )
-  }
-
-  function showTab(id) {
-    activeTab = id
-    store.set(STORE.tab, id)
-    for (const b of panel.querySelectorAll('.ol-agent-tabbtn')) b.classList.toggle('active', b.dataset.tab === id)
-    chatView.hidden = id !== 'chat'
-    termView.hidden = id !== 'terminal'
-    if (id === 'terminal') openTerminal()
-    else input.focus()
   }
 
   async function checkBridge() {
@@ -295,13 +250,12 @@
         err.message === 'jeton'
           ? 'Le pont de l’agent refuse la connexion (jeton différent). Relance Overleaf dans le Terminal du Mac :'
           : 'Le pont de l’agent ne répond pas. Relance Overleaf dans le Terminal du Mac :',
-        'overleaf',
-        'error'
+        'overleaf'
       )
       return false
     }
     if (!info.pi) {
-      note('pi n’est pas installé sur ce Mac. Dans le Terminal :', PI_INSTALL, 'error')
+      note('pi n’est pas installé sur ce Mac. Dans le Terminal :', PI_INSTALL)
       return false
     }
     const saved = store.get(STORE.model)
@@ -309,153 +263,38 @@
       ...(info.models.length ? info.models.map(m => h('option', { value: m }, m)) : [h('option', { value: '' }, 'modèle par défaut')])
     )
     modelSelect.value = info.models.includes(saved) ? saved : info.model || ''
-    if (!info.models.length) note('Aucun modèle Aristote trouvé : pi prendra son modèle par défaut. Pour configurer Aristote : lance pi dans le Terminal, puis /aristote.', null, 'warn')
     updateFooter()
-    sync().catch(() => {})
     startSyncLoop()
     return true
   }
 
-  function note(text, code, kind = 'info') {
-    const el = h('div', { class: `ol-agent-note ol-agent-${kind}` }, text)
+  function note(text, code) {
+    const el = h('div', { class: 'ol-agent-note ol-agent-error' }, text)
     if (code) el.append(h('code', {}, code))
-    chatLog.append(el)
-    scroll()
+    el.append(h('button', { class: 'ol-agent-btn ol-agent-retry', onclick: () => { info = null; termView.replaceChildren(); start() } }, 'Réessayer'))
+    termView.replaceChildren(el)
   }
 
-  const scroll = () => (chatLog.scrollTop = chatLog.scrollHeight)
+  async function start() {
+    if (!info && !(await checkBridge())) return
+    openTerminal()
+  }
 
   function toggle() {
     if (!panel) buildPanel()
     const open = panel.hidden
     panel.hidden = !open
     tabBtn?.classList.toggle('active', open)
-    if (open) {
-      const ready = info ? Promise.resolve(true) : checkBridge()
-      ready.then(() => showTab(activeTab))
-    }
+    if (open) start()
   }
 
-  // -------------------------------------------------------- λ Discussion
-
-  function setBusy(on) {
-    busy = on
-    sendBtn.hidden = on
-    stopBtn.hidden = !on
-    input.disabled = on
-  }
-
-  const bubble = (role, text = '') => {
-    const el = h('div', { class: `ol-agent-msg ol-agent-${role}` }, text)
-    chatLog.append(el)
-    scroll()
-    return el
-  }
-
-  const status = text => {
-    let el = chatLog.querySelector('.ol-agent-working')
-    if (!text) return el?.remove()
-    if (!el) el = h('div', { class: 'ol-agent-working' })
-    el.textContent = text
-    chatLog.append(el)
-    scroll()
-  }
-
-  async function send() {
-    const prompt = input.value.trim()
-    if (!prompt || busy) return
-    if (!info?.pi && !(await checkBridge())) return
-    chatLog.querySelector('.ol-agent-hint')?.remove()
-    bubble('user', prompt)
-    input.value = ''
-    setBusy(true)
-    current = null
-    try {
-      status('ε synchronisation du projet…')
-      await sync()
-      status('η l’agent réfléchit…')
-      const fresh = panel.dataset.fresh === '1'
-      delete panel.dataset.fresh
-      const r = await bridge('/run', { projectId: PROJECT_ID, prompt, model: modelSelect.value, fresh })
-      if (!r.ok) await jsonOrThrow(r)
-      const reader = r.body.getReader()
-      const decoder = new TextDecoder()
-      let buf = ''
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        let nl
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, nl)
-          buf = buf.slice(nl + 1)
-          if (line) await onEvent(JSON.parse(line))
-        }
-      }
-    } catch (err) {
-      note('Erreur : ' + err.message, null, 'error')
-    } finally {
-      status('')
-      setBusy(false)
-      input.focus()
-    }
-  }
-
-  const TOOL_LABELS = { read: 'lit', edit: 'modifie', write: 'écrit', ls: 'parcourt', find: 'cherche', grep: 'cherche' }
-
-  async function onEvent(e) {
-    switch (e.type) {
-      case 'message':
-        current = null
-        break
-      case 'thinking':
-        status('η l’agent réfléchit…')
-        break
-      case 'text':
-        if (!current) {
-          if (!e.delta.trim()) break
-          current = bubble('assistant')
-          e.delta = e.delta.replace(/^\s+/, '')
-        }
-        current.textContent += e.delta
-        status('')
-        scroll()
-        break
-      case 'tool':
-        current = null
-        chatLog.append(h('div', { class: 'ol-agent-tool' }, h('b', {}, 'λ '), `${TOOL_LABELS[e.name] || e.name} ${e.detail || ''}`))
-        status(`η l’agent ${TOOL_LABELS[e.name] || e.name} ${e.detail || ''}…`)
-        break
-      case 'error':
-        note(e.message, null, 'error')
-        break
-      case 'files': {
-        status('σ mise à jour du projet…')
-        const box = await applyFiles(e)
-        if (box) chatLog.append(box)
-        scroll()
-        break
-      }
-    }
-  }
-
-  function stop() {
-    bridge('/stop', { projectId: PROJECT_ID }).catch(() => {})
-  }
-
-  function reset() {
-    if (activeTab === 'terminal') return restartTerminal(true)
-    if (busy) return
-    panel.dataset.fresh = '1'
-    welcome()
-  }
-
-  // -------------------------------------------------------- τ Terminal
+  // -------------------------------------------------------- terminal
 
   let term = null
   let fit = null
   let ws = null
   let exited = false
+  let restarting = false // nouvelle conversation demandée : la fin de l'ancien pi est attendue
 
   const THEME = {
     background: '#141538',
@@ -487,11 +326,7 @@
       term.focus()
       return
     }
-    if (!info?.pi) {
-      termView.replaceChildren(h('div', { class: 'ol-agent-note ol-agent-error' }, 'pi n’est pas joignable : voir l’onglet Discussion.'))
-      return
-    }
-    termView.replaceChildren(h('div', { class: 'ol-agent-working' }, 'τ ouverture du terminal…'))
+    termView.replaceChildren(h('div', { class: 'ol-agent-note' }, 'τ ouverture du terminal…'))
     try {
       document.head.append(h('link', { rel: 'stylesheet', href: XTERM + '/css/xterm.css' }))
       await loadScript(XTERM + '/lib/xterm.js')
@@ -529,8 +364,9 @@
     term.focus()
   }
 
-  function connect() {
+  function connect(fresh = false) {
     const u = new URL(CONFIG.url.replace(/^http/, 'ws') + '/pty')
+    if (fresh) u.searchParams.set('fresh', '1')
     u.searchParams.set('project', PROJECT_ID)
     u.searchParams.set('token', CONFIG.token || '')
     u.searchParams.set('cols', term.cols)
@@ -542,6 +378,10 @@
       const msg = JSON.parse(ev.data)
       if (msg.t === 'o') term.write(msg.d)
       else if (msg.t === 'exit') {
+        if (restarting) {
+          restarting = false
+          return
+        }
         exited = true
         term.write('\r\n\x1b[38;2;242;188;60mπ s’est arrêté — Entrée pour relancer.\x1b[0m\r\n')
       } else if (msg.t === 'files') {
@@ -571,25 +411,26 @@
 
   function restartTerminal(fresh) {
     if (!term) return
-    if (fresh) term.clear()
-    if (ws?.readyState === WebSocket.OPEN) wsSend({ t: 'restart', cols: term.cols, rows: term.rows, model: modelSelect.value })
-    else connect()
+    if (fresh) term.reset()
+    restarting = fresh && !exited && ws?.readyState === WebSocket.OPEN
+    if (ws?.readyState === WebSocket.OPEN) wsSend({ t: 'restart', fresh, cols: term.cols, rows: term.rows, model: modelSelect.value })
+    else connect(fresh)
     exited = false
     term.focus()
   }
 
   function fitTerm() {
-    if (term && fit && !termView.hidden) {
+    if (term && fit && !panel.hidden) {
       try {
         fit.fit()
       } catch {}
     }
   }
 
-  function flash(text) {
-    const el = h('div', { class: 'ol-agent-flash' }, text)
+  function flash(text, warn = false) {
+    const el = h('div', { class: 'ol-agent-flash' + (warn ? ' ol-agent-flash-warn' : '') }, text)
     termView.append(el)
-    setTimeout(() => el.remove(), 2500)
+    setTimeout(() => el.remove(), warn ? 6000 : 2500)
   }
 
   // -------------------------------------------------------- onglet de la barre latérale

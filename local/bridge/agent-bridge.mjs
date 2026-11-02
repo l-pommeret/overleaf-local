@@ -5,9 +5,8 @@
 // synchronisée dans les deux sens avec Overleaf :
 //   - Overleaf → copie : le navigateur envoie régulièrement un instantané (POST /sync) ;
 //   - copie → Overleaf : les fichiers que pi modifie sont renvoyés au navigateur, qui les
-//     écrit dans le projet (fin d'une discussion, ou en continu pour le terminal).
-// Deux façons de parler à pi : la discussion (POST /run, `pi -p --mode json`, outils de
-// fichiers seulement) et le terminal (WebSocket /pty, pi interactif dans un pseudo-terminal).
+//     écrit dans le projet.
+// pi tourne en interactif dans un pseudo-terminal, relié à l'onglet par WebSocket (/pty).
 // Aucune dépendance : Node ≥ 18, python3 et la bibliothèque standard suffisent.
 import http from 'node:http'
 import fs from 'node:fs'
@@ -23,7 +22,6 @@ const HOME = Path.join(os.homedir(), '.overleaf-local')
 const ROOT = Path.join(HOME, 'agent')
 const PORT = Number(process.env.OL_AGENT_PORT || 8765)
 const TOKEN = (process.env.OL_AGENT_TOKEN || readOr(Path.join(HOME, 'agent-token'), '')).trim()
-const CHAT_TOOLS = 'read,edit,write,ls,find,grep'
 const PREFERRED = ['qwen-3.6-35b-instruct', 'qwen-3.8-27b', 'gemma-4-31b', 'mistral-small-4-119b']
 const MAX_BODY = 200 * 1024 * 1024
 const TEXT_EXT = new Set(
@@ -38,11 +36,6 @@ const CONTEXT = [
   'Overleaf compiles the PDF itself after your changes; the log of the latest Overleaf compile is .overleaf/output.log (read it to fix compile errors).',
   'Deleting a file here does not delete it in Overleaf.',
 ]
-const SYSTEM_CHAT = [
-  ...CONTEXT,
-  'Change files directly with your tools; you cannot run commands.',
-  "Answer in the user's language, briefly, and say which files you changed.",
-].join(' ')
 const SYSTEM_TERM = [
   ...CONTEXT,
   'Never write build artefacts (aux, log, pdf…) here: if you compile locally, use a temporary output directory (latexmk -outdir=/tmp/…).',
@@ -113,7 +106,6 @@ function project(id) {
       pty: null,
       watcher: null,
       timer: null,
-      running: null,
     }
     fs.mkdirSync(p.dir, { recursive: true })
     fs.mkdirSync(p.sessions, { recursive: true })
@@ -259,84 +251,6 @@ function unwatch(p) {
   clearTimeout(p.timer)
 }
 
-// ---------------------------------------------------------------- discussion
-
-async function handleRun(req, res, body) {
-  const p = project(body.projectId)
-  const { prompt, model, fresh } = body
-  if (!prompt) return sendJson(res, 400, { error: 'consigne vide' })
-  if (!p.synced) return sendJson(res, 409, { error: 'projet pas encore synchronisé' })
-  if (p.running) return sendJson(res, 409, { error: "l'agent travaille déjà sur ce projet" })
-  const info = await piInfo()
-  if (!info.pi) return sendJson(res, 503, { error: 'pi est introuvable sur ce Mac' })
-  const chatSessions = Path.join(p.sessions, 'discussion')
-  if (fresh) fs.rmSync(chatSessions, { recursive: true, force: true })
-  fs.mkdirSync(chatSessions, { recursive: true })
-
-  res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache', ...cors(req) })
-  const emit = event => res.write(JSON.stringify(event) + '\n')
-  const chosen = (model && info.models.includes(model) && model) || info.model
-  const args = ['-p', '--mode', 'json', '--session-dir', chatSessions, '-t', CHAT_TOOLS, '--append-system-prompt', SYSTEM_CHAT]
-  if (fs.readdirSync(chatSessions).length) args.push('-c')
-  if (chosen) args.push('--model', `aristote/${chosen}`)
-  args.push(prompt)
-  emit({ type: 'start', model: chosen ? `aristote/${chosen}` : 'modèle par défaut de pi' })
-
-  const child = spawn('pi', args, {
-    cwd: p.dir,
-    env: { ...process.env, ARISTOTE_SUBAGENT: '' },
-    stdio: ['ignore', 'pipe', 'pipe'], // pi -p lit stdin s'il est ouvert
-  })
-  p.running = child
-  let buffer = ''
-  let stderr = ''
-  let finalText = ''
-  child.stdout.on('data', chunk => {
-    buffer += chunk
-    let nl
-    while ((nl = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, nl)
-      buffer = buffer.slice(nl + 1)
-      let e
-      try {
-        e = JSON.parse(line)
-      } catch {
-        continue
-      }
-      if (e.type === 'message_update') {
-        const a = e.assistantMessageEvent || {}
-        if (a.type === 'text_delta') emit({ type: 'text', delta: a.delta })
-        else if (a.type === 'thinking_start') emit({ type: 'thinking' })
-      } else if (e.type === 'message_start' && e.message?.role === 'assistant') {
-        emit({ type: 'message' })
-      } else if (e.type === 'tool_execution_start') {
-        const a = e.args || {}
-        const detail = String(a.path || a.pattern || a.file_path || '')
-        const rel = detail === p.dir ? '.' : detail.startsWith(p.dir + '/') ? detail.slice(p.dir.length + 1) : detail
-        emit({ type: 'tool', name: e.toolName, detail: rel })
-      } else if (e.type === 'message_end' && e.message?.role === 'assistant') {
-        if (e.message.errorMessage) emit({ type: 'error', message: e.message.errorMessage })
-        finalText = (e.message.content || []).filter(c => c.type === 'text').map(c => c.text).join('')
-      }
-    }
-  })
-  child.stderr.on('data', chunk => (stderr = (stderr + chunk).slice(-4000)))
-  res.on('close', () => {
-    if (!res.writableEnded) child.kill('SIGTERM')
-  })
-  child.on('close', code => {
-    p.running = null
-    if (res.writableEnded || res.destroyed) return
-    if (code !== 0 && !finalText) {
-      emit({ type: 'error', message: stderr.trim().split('\n').slice(-3).join('\n') || `pi s'est arrêté (code ${code})` })
-    }
-    const { changed, deleted } = localChanges(p)
-    emit({ type: 'files', changed, deleted })
-    emit({ type: 'done', code })
-    res.end()
-  })
-}
-
 // ---------------------------------------------------------------- terminal (WebSocket)
 
 function wsSend(socket, obj) {
@@ -406,13 +320,14 @@ function wsFrames(socket, onMessage) {
   })
 }
 
-async function startPty(p, cols, rows, model) {
+async function startPty(p, cols, rows, model, fresh = false) {
   const info = await piInfo()
   if (!info.pi) {
     broadcast(p, { t: 'o', d: '\r\n\x1b[31mpi est introuvable sur ce Mac.\x1b[0m\r\n' })
     return
   }
   const termSessions = Path.join(p.sessions, 'terminal')
+  if (fresh) fs.rmSync(termSessions, { recursive: true, force: true })
   fs.mkdirSync(termSessions, { recursive: true })
   const chosen = (model && info.models.includes(model) && model) || info.model
   const args = ['--session-dir', termSessions, '--append-system-prompt', SYSTEM_TERM]
@@ -461,7 +376,14 @@ function handleUpgrade(req, socket) {
   wsFrames(socket, msg => {
     if (msg.t === 'i' && p.pty) p.pty.stdin.write(msg.d)
     else if (msg.t === 'r' && p.pty) p.pty.stdio[3].write(`${msg.cols | 0} ${msg.rows | 0}\n`)
-    else if (msg.t === 'restart' && !p.pty) startPty(p, msg.cols || cols, msg.rows || rows, msg.model)
+    else if (msg.t === 'restart') {
+      const restart = () => startPty(p, msg.cols || cols, msg.rows || rows, msg.model, msg.fresh)
+      if (!p.pty) restart()
+      else if (msg.fresh) {
+        p.pty.once('close', restart)
+        p.pty.kill('SIGTERM')
+      }
+    }
   })
   const close = () => {
     p.sockets.delete(socket)
@@ -472,7 +394,7 @@ function handleUpgrade(req, socket) {
   }
   socket.on('close', close)
   socket.on('error', close)
-  if (!p.pty) startPty(p, cols, rows, url.searchParams.get('model'))
+  if (!p.pty) startPty(p, cols, rows, url.searchParams.get('model'), url.searchParams.get('fresh') === '1')
   else p.pty.stdio[3].write(`${cols} ${rows}\n`)
 }
 
@@ -536,8 +458,6 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST') return sendJson(res, 404, { error: 'introuvable' })
     const body = await readBody(req)
     switch (url.pathname) {
-      case '/run':
-        return await handleRun(req, res, body)
       case '/sync': {
         const p = project(body.projectId)
         const need = applySnapshot(p, body)
@@ -553,10 +473,6 @@ const server = http.createServer(async (req, res) => {
         const p = project(body.projectId)
         fs.mkdirSync(Path.join(p.dir, '.overleaf'), { recursive: true })
         fs.writeFileSync(Path.join(p.dir, '.overleaf', 'output.log'), String(body.text || ''))
-        return sendJson(res, 200, { ok: true })
-      }
-      case '/stop': {
-        projects.get(body.projectId)?.running?.kill('SIGTERM')
         return sendJson(res, 200, { ok: true })
       }
     }
