@@ -1,0 +1,12 @@
+/* Vert sapin : surcharge des variables qui ne passent pas par les fichiers recolorés. */
+:root {
+  --green-10: #e7f0ea;
+  --green-15: #d3e3d8;
+  --green-20: #adc9b6;
+  --green-30: #7ba68a;
+  --green-40: #4f8a63;
+  --green-50: #0b5d2f;
+  --green-60: #095228;
+  --green-65: #084a24;
+  --green-70: #073f1f;
+}

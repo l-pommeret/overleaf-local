@@ -1,0 +1,180 @@
+#!/bin/bash
+# overleaf : lance Overleaf en local (sans compte, vert sapin, onglet Agent).
+#
+#   overleaf            démarre tout et ouvre le navigateur
+#   overleaf stop       arrête Overleaf et libère la mémoire
+#   overleaf status     état des services
+#   overleaf logs       journaux d'Overleaf
+#   overleaf update     met à jour depuis GitHub puis redémarre
+#   overleaf rebuild    reconstruit l'image LaTeX (après une mise à jour d'Overleaf)
+set -euo pipefail
+
+SELF="$0"
+while [[ -L "$SELF" ]]; do
+  target="$(readlink "$SELF")"
+  [[ "$target" = /* ]] && SELF="$target" || SELF="$(dirname "$SELF")/$target"
+done
+ROOT="$(cd "$(dirname "$SELF")" && pwd)"
+STATE="$HOME/.overleaf-local"
+AGENT_PORT="${OL_AGENT_PORT:-8765}"
+LOCAL_IMAGE="overleaf-local/sharelatex"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+mkdir -p "$STATE"
+
+say() { printf '\033[1;32m›\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+arch_is_arm() { [[ "$(uname -m)" == arm64 ]]; }
+
+# Remplace (ou ajoute) CLE=valeur dans un fichier de config.
+set_kv() {
+  local file=$1 key=$2 value=$3
+  grep -v "^${key}=" "$file" > "$file.tmp" || true
+  printf '%s=%s\n' "$key" "$value" >> "$file.tmp"
+  mv "$file.tmp" "$file"
+}
+
+ensure_docker() {
+  if docker info >/dev/null 2>&1; then return; fi
+  command -v colima >/dev/null || die "Docker est introuvable. Relance l'installation."
+  say "Démarrage de la machine virtuelle Docker (Colima)…"
+  if colima list 2>/dev/null | grep -q '^default'; then
+    colima start
+  elif arch_is_arm; then
+    colima start --cpu 4 --memory 4 --disk 40 --vm-type vz --vz-rosetta
+  else
+    colima start --cpu 4 --memory 4 --disk 40
+  fi
+  docker context use colima >/dev/null 2>&1 || true
+  docker info >/dev/null 2>&1 || die "Docker ne répond pas."
+}
+
+port_free() { ! lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+
+configure() {
+  cd "$ROOT"
+  [[ -f config/overleaf.rc ]] || bin/init >/dev/null
+  local rc=config/overleaf.rc env=config/variables.env
+  if [[ ! -f "$STATE/port" ]]; then
+    local port=80
+    port_free 80 || port=8080
+    port_free "$port" || port=8090
+    echo "$port" > "$STATE/port"
+  fi
+  [[ -f "$STATE/agent-token" ]] || openssl rand -hex 24 > "$STATE/agent-token"
+  set_kv "$rc" OVERLEAF_PORT "$(cat "$STATE/port")"
+  set_kv "$rc" SIBLING_CONTAINERS_ENABLED false
+  set_kv "$rc" OVERLEAF_IMAGE_NAME "$LOCAL_IMAGE"
+  set_kv "$env" OVERLEAF_APP_NAME "Overleaf de YomYom"
+  set_kv "$env" OVERLEAF_NAV_TITLE "Overleaf de YomYom"
+  set_kv "$env" OVERLEAF_COOKIE_SESSION_LENGTH 31536000000
+  set_kv "$env" OL_AGENT_URL "http://127.0.0.1:$AGENT_PORT"
+  set_kv "$env" OL_AGENT_TOKEN "$(cat "$STATE/agent-token")"
+  {
+    echo "# Généré par ./overleaf : ne pas modifier à la main."
+    echo "services:"
+    echo "  sharelatex:"
+    arch_is_arm && echo "    platform: linux/amd64"
+    echo "    environment:"
+    echo "      OVERLEAF_CONFIG: /etc/overleaf/ol-local-settings.js"
+    echo "    volumes:"
+    echo "      - \"$ROOT/local/module:/overleaf/services/web/modules/ol-local:ro\""
+    echo "      - \"$ROOT/local/settings.js:/etc/overleaf/ol-local-settings.js:ro\""
+    echo "      - \"$ROOT/local/init/50-sapin.sh:/etc/my_init.d/50_ol_local_sapin.sh:ro\""
+  } > config/docker-compose.override.yml
+}
+
+image_version() { cat "$ROOT/config/version"; }
+
+build_image() {
+  local version
+  version="$(image_version)"
+  say "Préparation de l'image LaTeX (une seule fois, 10 à 30 minutes selon la connexion)…"
+  local platform=()
+  arch_is_arm && platform=(--platform linux/amd64)
+  docker build "${platform[@]}" --build-arg "BASE=sharelatex/sharelatex:$version" \
+    -t "$LOCAL_IMAGE:$version" "$ROOT/local/image"
+}
+
+ensure_image() {
+  docker image inspect "$LOCAL_IMAGE:$(image_version)" >/dev/null 2>&1 || build_image
+}
+
+bridge_pid() { cat "$STATE/agent.pid" 2>/dev/null || true; }
+
+stop_bridge() {
+  local pid
+  pid="$(bridge_pid)"
+  [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  rm -f "$STATE/agent.pid"
+}
+
+start_bridge() {
+  stop_bridge
+  if ! command -v node >/dev/null; then
+    say "Node.js absent : l'onglet Agent restera inactif (installe pi-aristote pour l'activer)."
+    return
+  fi
+  OL_AGENT_PORT="$AGENT_PORT" nohup node "$ROOT/local/bridge/agent-bridge.mjs" \
+    >> "$STATE/agent.log" 2>&1 &
+  echo $! > "$STATE/agent.pid"
+}
+
+url() { local p; p="$(cat "$STATE/port")"; [[ "$p" == 80 ]] && echo "http://localhost" || echo "http://localhost:$p"; }
+
+wait_ready() {
+  say "Démarrage d'Overleaf…"
+  for _ in $(seq 1 90); do
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' "$(url)/status")" == 200 ]] && return
+    sleep 2
+  done
+  die "Overleaf ne répond pas. Journaux : overleaf logs"
+}
+
+cmd_start() {
+  ensure_docker
+  configure
+  ensure_image
+  cd "$ROOT"
+  bin/up -d >/dev/null 2>&1 || bin/up -d
+  start_bridge
+  wait_ready
+  say "Overleaf est prêt : $(url)"
+  [[ "${OL_NO_OPEN:-}" == 1 ]] || open "$(url)/project"
+}
+
+cmd_stop() {
+  stop_bridge
+  if docker info >/dev/null 2>&1; then
+    (cd "$ROOT" && bin/stop >/dev/null 2>&1) || true
+  fi
+  if command -v colima >/dev/null && colima status >/dev/null 2>&1; then
+    colima stop >/dev/null 2>&1 || true
+  fi
+  say "Overleaf est arrêté."
+}
+
+case "${1:-start}" in
+  start | up) cmd_start ;;
+  stop | down) cmd_stop ;;
+  restart) cmd_stop; cmd_start ;;
+  status)
+    ensure_docker
+    (cd "$ROOT" && bin/docker-compose ps)
+    curl -s -H "X-Agent-Token: $(cat "$STATE/agent-token" 2>/dev/null)" "http://127.0.0.1:$AGENT_PORT/health" \
+      && echo || echo "Agent : arrêté"
+    ;;
+  logs) cd "$ROOT" && bin/logs -f web ;;
+  update)
+    git -C "$ROOT" pull --ff-only
+    cmd_start
+    ;;
+  rebuild)
+    ensure_docker
+    configure
+    build_image
+    cmd_start
+    ;;
+  -h | --help | help) sed -n '2,10p' "$ROOT/overleaf" | sed 's/^# \{0,1\}//' ;;
+  *) die "Commande inconnue : $1 (voir overleaf help)" ;;
+esac

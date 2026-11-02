@@ -152,7 +152,8 @@ rebrand_sharelatex_env_variables() {
     echo "  Creating backup file config/$backup_filename"
     cp "$TOOLKIT_ROOT/config/$filename" "$TOOLKIT_ROOT/config/$backup_filename"
     echo "  Replacing 'SHARELATEX_' with 'OVERLEAF_' in config/$filename"
-    sed -i "s/SHARELATEX_/OVERLEAF_/g" "$TOOLKIT_ROOT/config/$filename"
+    sed -i.bak "s/SHARELATEX_/OVERLEAF_/g" "$TOOLKIT_ROOT/config/$filename"
+    rm -f "$TOOLKIT_ROOT/config/$filename.bak"
     echo "  Updated $sharelatex_occurrences lines in config/$filename"
   else
     if [[ "$silent" != "silent_if_no_match" ]]; then
@@ -217,11 +218,11 @@ function check_sharelatex_env_vars() {
 function read_variable() {
   local name=$1
   grep -E "^$name=" "$TOOLKIT_ROOT/config/variables.env" \
-  | sed -r "s/^$name=([\"']?)(.+)\1\$/\2/"
+  | sed -E -e "s/^$name=//" -e 's/^"(.*)"$/\1/' -e "s/^'(.*)'\$/\1/"
 }
 
 function read_configuration() {
   local name=$1
   grep -E "^$name=" "$TOOLKIT_ROOT/config/overleaf.rc" \
-  | sed -E "s/^$name=([\"']?)(.+)\1\$/\2/"
+  | sed -E -e "s/^$name=//" -e 's/^"(.*)"$/\1/' -e "s/^'(.*)'\$/\1/"
 }
