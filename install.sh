@@ -57,10 +57,10 @@ fi
 
 # 3. Le dépôt
 if [[ -d "$DIR/.git" ]]; then
-  say "Mise à jour de $DIR…"
+  say "Mise à jour de ${DIR}…"
   git -C "$DIR" pull --ff-only --quiet
 else
-  say "Téléchargement dans $DIR…"
+  say "Téléchargement dans ${DIR}…"
   git clone --quiet "$REPO" "$DIR"
 fi
 chmod +x "$DIR/overleaf" "$DIR/local/init/50-sapin.sh"
