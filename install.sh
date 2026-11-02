@@ -42,17 +42,27 @@ else
     /usr/sbin/softwareupdate --install-rosetta --agree-to-license
   fi
   # Config Docker : greffon compose de Homebrew, et plus de trace d'un ancien Docker Desktop.
+  # (JavaScript de macOS plutôt que plutil, qui ne sait pas réécrire un « {} ».)
   mkdir -p "$HOME/.docker"
   cfg="$HOME/.docker/config.json"
-  [[ -s "$cfg" ]] || echo '{}' > "$cfg"
-  if ! plutil -extract cliPluginsExtraDirs json -o - "$cfg" >/dev/null 2>&1; then
-    cp "$cfg" "$cfg.bak-overleaf-local"
-    plutil -insert cliPluginsExtraDirs -json "[\"$BREW_PREFIX/lib/docker/cli-plugins\"]" "$cfg"
-  fi
-  if plutil -extract credsStore raw "$cfg" 2>/dev/null | grep -qx desktop && ! command -v docker-credential-desktop >/dev/null; then
-    [[ -f "$cfg.bak-overleaf-local" ]] || cp "$cfg" "$cfg.bak-overleaf-local"
-    plutil -remove credsStore "$cfg"
-  fi
+  [[ -s "$cfg" ]] && cp "$cfg" "$cfg.bak-overleaf-local"
+  osascript -l JavaScript - "$cfg" "$BREW_PREFIX/lib/docker/cli-plugins" "$(command -v docker-credential-desktop || true)" <<'JS'
+ObjC.import('Foundation')
+function run(argv) {
+  const [path, plugins, desktopHelper] = argv
+  const raw = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, null)
+  let cfg = {}
+  if (!raw.isNil()) {
+    const text = raw.js.trim()
+    if (text) cfg = JSON.parse(text)
+  }
+  const dirs = cfg.cliPluginsExtraDirs || []
+  if (!dirs.includes(plugins)) cfg.cliPluginsExtraDirs = dirs.concat([plugins])
+  if (cfg.credsStore === 'desktop' && !desktopHelper) delete cfg.credsStore
+  if (cfg.currentContext === 'desktop-linux' && !desktopHelper) delete cfg.currentContext
+  $(JSON.stringify(cfg, null, 2) + '\n').writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null)
+}
+JS
 fi
 
 # 3. Le dépôt
